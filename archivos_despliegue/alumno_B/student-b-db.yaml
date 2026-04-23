@@ -1,0 +1,147 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Student B Database Server stack with its own Security Group using
+  PostgreSQL Marketplace AMI
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: practica-aws
+    Description: Project identifier used in tags and names
+
+  OwnerName:
+    Type: String
+    Default: alumnoB
+    Description: Stack owner or student name
+
+  AmiId:
+    Type: AWS::EC2::Image::Id
+    Default: ami-0b18518a77c750f98
+    Description: PostgreSQL Marketplace AMI for eu-south-2
+
+  InstanceType:
+    Type: String
+    Default: t3.micro
+    AllowedValues:
+      - t3.micro
+      - t3.small
+      - t3.medium
+      - t3.large
+    Description: EC2 instance type for the database server
+
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: Existing EC2 Key Pair name
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC where the database server will be deployed
+
+  PrivateSubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Private subnet where the database server will be deployed
+
+  DbS3InstanceProfileName:
+    Type: String
+    Description: Instance profile name for the database server S3 access
+
+  AllowedSshCidr:
+    Type: String
+    Default: 0.0.0.0/0
+    Description: CIDR allowed to access the instance via SSH
+
+  AllowedPostgresCidr:
+    Type: String
+    Default: 10.0.0.0/8
+    Description: CIDR allowed to reach PostgreSQL on port 5432
+
+Resources:
+  DatabaseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group for Student B database server
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref AllowedSshCidr
+          Description: SSH access
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          CidrIp: !Ref AllowedPostgresCidr
+          Description: PostgreSQL access from allowed sources
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: Default outbound traffic
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${OwnerName}-db-sg
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Owner
+          Value: !Ref OwnerName
+        - Key: Layer
+          Value: database
+
+  DatabaseInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyName
+      SubnetId: !Ref PrivateSubnetId
+      SecurityGroupIds:
+        - !Ref DatabaseSecurityGroup
+      IamInstanceProfile: !Ref DbS3InstanceProfileName
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${OwnerName}-db
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Owner
+          Value: !Ref OwnerName
+        - Key: Layer
+          Value: database
+
+  DatabaseElasticIp:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${OwnerName}-db-eip
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Owner
+          Value: !Ref OwnerName
+        - Key: Layer
+          Value: database
+
+  DatabaseElasticIpAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      InstanceId: !Ref DatabaseInstance
+      AllocationId: !GetAtt DatabaseElasticIp.AllocationId
+
+Outputs:
+  DatabaseInstanceId:
+    Description: EC2 instance ID of the database server
+    Value: !Ref DatabaseInstance
+
+  DatabasePrivateIp:
+    Description: Private IP of the database server
+    Value: !GetAtt DatabaseInstance.PrivateIp
+
+  DatabaseElasticIp:
+    Description: Elastic IP associated with the database server
+    Value: !Ref DatabaseElasticIp
+
+  DatabaseSecurityGroupId:
+    Description: Security Group ID of the database server
+    Value: !Ref DatabaseSecurityGroup
+
+  DatabaseAmiId:
+    Description: AMI used by the database server
+    Value: !Ref AmiId
