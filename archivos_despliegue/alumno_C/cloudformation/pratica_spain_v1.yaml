@@ -1,0 +1,444 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Alumno C - 2 Web Servers Linux para modulo /alumnos
+  Amazon Linux 2023, t3.micro, eu-south-2
+  Nginx + Python Flask + NTP sincronizado con AD
+
+Parameters:
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: Nombre del Key Pair
+    Default: keypair_alumnoC
+
+  ADIP:
+    Type: String
+    Description: IP privada del Active Directory para NTP
+    Default: "10.10.1.10"
+
+  DBIP:
+    Type: String
+    Description: IP privada del servidor de base de datos
+    Default: "10.20.0.0"
+
+Resources:
+
+  # -------------------------------------------------------
+  # Security Group Web Servers
+  # -------------------------------------------------------
+  SGWebServerC:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: SG Web Servers Alumno C
+      VpcId: vpc-088606d90ab567b3d
+      SecurityGroupIngress:
+        # SSH desde cualquier lugar
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        # HTTP desde cualquier lugar (Load Balancer)
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        # Puerto 5000 Flask desde la VPC
+        - IpProtocol: tcp
+          FromPort: 5000
+          ToPort: 5000
+          CidrIp: 0.0.0.0/0
+        # NTP saliente hacia AD
+        - IpProtocol: udp
+          FromPort: 123
+          ToPort: 123
+          CidrIp: 0.0.0.0/0
+        # Todo el trafico interno VPC
+        - IpProtocol: -1
+          CidrIp: 10.0.0.0/8
+      Tags:
+        - Key: Name
+          Value: SG-WebServer-AlumnoC
+
+  # -------------------------------------------------------
+  # Elastic IPs
+  # -------------------------------------------------------
+  EIPWebServer1:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  EIPWebServer2:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  # -------------------------------------------------------
+  # Web Server 1 - Alumno C
+  # -------------------------------------------------------
+  WebServer1:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.micro
+      ImageId: ami-048dc219ff68b99b1
+      KeyName: !Ref KeyPairName
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: false
+          DeviceIndex: '0'
+          SubnetId: subnet-0589467c73b0f7497
+          GroupSet:
+            - !Ref SGWebServerC
+      Tags:
+        - Key: Name
+          Value: WebServer1-AlumnoC
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -e
+          exec > /var/log/userdata.log 2>&1
+
+          # ── Actualizar sistema ──
+          dnf update -y
+          dnf install -y nginx python3 python3-pip chrony postgresql15
+
+          # ── Configurar NTP con el AD ──
+          cat > /etc/chrony.conf << 'CHRONY'
+          server ${ADIP} iburst prefer
+          server 0.pool.ntp.org iburst
+          driftfile /var/lib/chrony/drift
+          makestep 1.0 3
+          rtcsync
+          CHRONY
+          systemctl enable --now chronyd
+          chronyc makestep
+
+          # ── Instalar dependencias Python ──
+          pip3 install flask psycopg2-binary flask-cors
+
+          # ── Crear aplicacion Flask modulo /alumnos ──
+          mkdir -p /opt/app
+          cat > /opt/app/app.py << 'PYAPP'
+          from flask import Flask, jsonify, request
+          from flask_cors import CORS
+          import psycopg2
+          import os
+
+          app = Flask(__name__)
+          CORS(app)
+
+          DB_HOST = os.environ.get('DB_HOST', '${DBIP}')
+          DB_NAME = os.environ.get('DB_NAME', 'practica_db')
+          DB_USER = os.environ.get('DB_USER', 'alumno_c')
+          DB_PASS = os.environ.get('DB_PASS', 'Airbusds2026!')
+
+          def get_db():
+              return psycopg2.connect(
+                  host=DB_HOST, database=DB_NAME,
+                  user=DB_USER, password=DB_PASS
+              )
+
+          @app.route('/alumnos', methods=['GET'])
+          def get_alumnos():
+              try:
+                  conn = get_db()
+                  cur = conn.cursor()
+                  cur.execute("SELECT id, nombre, correo FROM alumnos ORDER BY nombre")
+                  rows = cur.fetchall()
+                  cur.close()
+                  conn.close()
+                  return jsonify([{"id": r[0], "nombre": r[1], "correo": r[2]} for r in rows])
+              except Exception as e:
+                  return jsonify({"error": str(e)}), 500
+
+          @app.route('/alumnos/<int:alumno_id>/notas', methods=['GET'])
+          def get_notas(alumno_id):
+              try:
+                  conn = get_db()
+                  cur = conn.cursor()
+                  cur.execute("""
+                      SELECT i.id, i.asignatura_id, i.nota
+                      FROM inscripciones i
+                      WHERE i.alumno_id = %s
+                  """, (alumno_id,))
+                  rows = cur.fetchall()
+                  cur.close()
+                  conn.close()
+                  return jsonify([{"id": r[0], "asignatura_id": r[1], "nota": r[2]} for r in rows])
+              except Exception as e:
+                  return jsonify({"error": str(e)}), 500
+
+          @app.route('/alumnos/<int:alumno_id>/inscripciones', methods=['POST'])
+          def inscribir(alumno_id):
+              data = request.get_json()
+              try:
+                  conn = get_db()
+                  cur = conn.cursor()
+                  cur.execute("""
+                      INSERT INTO inscripciones (alumno_id, asignatura_id)
+                      VALUES (%s, %s) RETURNING id
+                  """, (alumno_id, data['asignatura_id']))
+                  new_id = cur.fetchone()[0]
+                  conn.commit()
+                  cur.close()
+                  conn.close()
+                  return jsonify({"id": new_id, "mensaje": "Inscripcion realizada"}), 201
+              except Exception as e:
+                  return jsonify({"error": str(e)}), 500
+
+          @app.route('/health', methods=['GET'])
+          def health():
+              return jsonify({"status": "ok", "servidor": "WebServer1-AlumnoC"})
+
+          if __name__ == '__main__':
+              app.run(host='0.0.0.0', port=5000)
+          PYAPP
+
+          # ── Crear servicio systemd para Flask ──
+          cat > /etc/systemd/system/flask-app.service << 'SERVICE'
+          [Unit]
+          Description=Flask App Alumno C
+          After=network.target
+
+          [Service]
+          User=root
+          WorkingDirectory=/opt/app
+          Environment="DB_HOST=${DBIP}"
+          Environment="DB_NAME=practica_db"
+          Environment="DB_USER=alumno_c"
+          Environment="DB_PASS=Airbusds2026!"
+          ExecStart=/usr/bin/python3 /opt/app/app.py
+          Restart=always
+
+          [Install]
+          WantedBy=multi-user.target
+          SERVICE
+
+          systemctl enable --now flask-app
+
+          # ── Configurar Nginx como reverse proxy ──
+          cat > /etc/nginx/conf.d/alumnos.conf << 'NGINX'
+          server {
+              listen 80;
+              server_name _;
+
+              location /alumnos {
+                  proxy_pass http://127.0.0.1:5000;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+              }
+
+              location /health {
+                  proxy_pass http://127.0.0.1:5000;
+              }
+          }
+          NGINX
+
+          # Quitar configuracion por defecto de Nginx
+          rm -f /etc/nginx/conf.d/default.conf
+
+          systemctl enable --now nginx
+          systemctl restart nginx
+
+          echo "WebServer1 AlumnoC configurado correctamente" > /tmp/setup_done.txt
+
+  EIPAssociation1:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      InstanceId: !Ref WebServer1
+      EIP: !Ref EIPWebServer1
+
+  # -------------------------------------------------------
+  # Web Server 2 - Alumno C (redundancia)
+  # -------------------------------------------------------
+  WebServer2:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.micro
+      ImageId: ami-048dc219ff68b99b1
+      KeyName: !Ref KeyPairName
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: false
+          DeviceIndex: '0'
+          SubnetId: subnet-0589467c73b0f7497
+          GroupSet:
+            - !Ref SGWebServerC
+      Tags:
+        - Key: Name
+          Value: WebServer2-AlumnoC
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -e
+          exec > /var/log/userdata.log 2>&1
+
+          # ── Actualizar sistema ──
+          dnf update -y
+          dnf install -y nginx python3 python3-pip chrony postgresql15
+
+          # ── Configurar NTP con el AD ──
+          cat > /etc/chrony.conf << 'CHRONY'
+          server ${ADIP} iburst prefer
+          server 0.pool.ntp.org iburst
+          driftfile /var/lib/chrony/drift
+          makestep 1.0 3
+          rtcsync
+          CHRONY
+          systemctl enable --now chronyd
+          chronyc makestep
+
+          # ── Instalar dependencias Python ──
+          pip3 install flask psycopg2-binary flask-cors
+
+          # ── Crear aplicacion Flask modulo /alumnos ──
+          mkdir -p /opt/app
+          cat > /opt/app/app.py << 'PYAPP'
+          from flask import Flask, jsonify, request
+          from flask_cors import CORS
+          import psycopg2
+          import os
+
+          app = Flask(__name__)
+          CORS(app)
+
+          DB_HOST = os.environ.get('DB_HOST', '${DBIP}')
+          DB_NAME = os.environ.get('DB_NAME', 'practica_db')
+          DB_USER = os.environ.get('DB_USER', 'alumno_c')
+          DB_PASS = os.environ.get('DB_PASS', 'Airbusds2026!')
+
+          def get_db():
+              return psycopg2.connect(
+                  host=DB_HOST, database=DB_NAME,
+                  user=DB_USER, password=DB_PASS
+              )
+
+          @app.route('/alumnos', methods=['GET'])
+          def get_alumnos():
+              try:
+                  conn = get_db()
+                  cur = conn.cursor()
+                  cur.execute("SELECT id, nombre, correo FROM alumnos ORDER BY nombre")
+                  rows = cur.fetchall()
+                  cur.close()
+                  conn.close()
+                  return jsonify([{"id": r[0], "nombre": r[1], "correo": r[2]} for r in rows])
+              except Exception as e:
+                  return jsonify({"error": str(e)}), 500
+
+          @app.route('/alumnos/<int:alumno_id>/notas', methods=['GET'])
+          def get_notas(alumno_id):
+              try:
+                  conn = get_db()
+                  cur = conn.cursor()
+                  cur.execute("""
+                      SELECT i.id, i.asignatura_id, i.nota
+                      FROM inscripciones i
+                      WHERE i.alumno_id = %s
+                  """, (alumno_id,))
+                  rows = cur.fetchall()
+                  cur.close()
+                  conn.close()
+                  return jsonify([{"id": r[0], "asignatura_id": r[1], "nota": r[2]} for r in rows])
+              except Exception as e:
+                  return jsonify({"error": str(e)}), 500
+
+          @app.route('/alumnos/<int:alumno_id>/inscripciones', methods=['POST'])
+          def inscribir(alumno_id):
+              data = request.get_json()
+              try:
+                  conn = get_db()
+                  cur = conn.cursor()
+                  cur.execute("""
+                      INSERT INTO inscripciones (alumno_id, asignatura_id)
+                      VALUES (%s, %s) RETURNING id
+                  """, (alumno_id, data['asignatura_id']))
+                  new_id = cur.fetchone()[0]
+                  conn.commit()
+                  cur.close()
+                  conn.close()
+                  return jsonify({"id": new_id, "mensaje": "Inscripcion realizada"}), 201
+              except Exception as e:
+                  return jsonify({"error": str(e)}), 500
+
+          @app.route('/health', methods=['GET'])
+          def health():
+              return jsonify({"status": "ok", "servidor": "WebServer2-AlumnoC"})
+
+          if __name__ == '__main__':
+              app.run(host='0.0.0.0', port=5000)
+          PYAPP
+
+          # ── Crear servicio systemd para Flask ──
+          cat > /etc/systemd/system/flask-app.service << 'SERVICE'
+          [Unit]
+          Description=Flask App Alumno C
+          After=network.target
+
+          [Service]
+          User=root
+          WorkingDirectory=/opt/app
+          Environment="DB_HOST=${DBIP}"
+          Environment="DB_NAME=practica_db"
+          Environment="DB_USER=alumno_c"
+          Environment="DB_PASS=Airbusds2026!"
+          ExecStart=/usr/bin/python3 /opt/app/app.py
+          Restart=always
+
+          [Install]
+          WantedBy=multi-user.target
+          SERVICE
+
+          systemctl enable --now flask-app
+
+          # ── Configurar Nginx como reverse proxy ──
+          cat > /etc/nginx/conf.d/alumnos.conf << 'NGINX'
+          server {
+              listen 80;
+              server_name _;
+
+              location /alumnos {
+                  proxy_pass http://127.0.0.1:5000;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+              }
+
+              location /health {
+                  proxy_pass http://127.0.0.1:5000;
+              }
+          }
+          NGINX
+
+          rm -f /etc/nginx/conf.d/default.conf
+          systemctl enable --now nginx
+          systemctl restart nginx
+
+          echo "WebServer2 AlumnoC configurado correctamente" > /tmp/setup_done.txt
+
+  EIPAssociation2:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      InstanceId: !Ref WebServer2
+      EIP: !Ref EIPWebServer2
+
+Outputs:
+
+  WebServer1IP:
+    Description: IP publica WebServer1
+    Value: !Ref EIPWebServer1
+
+  WebServer2IP:
+    Description: IP publica WebServer2
+    Value: !Ref EIPWebServer2
+
+  WebServer1PrivateIP:
+    Description: IP privada WebServer1 (para el Load Balancer)
+    Value: !GetAtt WebServer1.PrivateIp
+
+  WebServer2PrivateIP:
+    Description: IP privada WebServer2 (para el Load Balancer)
+    Value: !GetAtt WebServer2.PrivateIp
+
+  HealthCheck1:
+    Description: URL health check WebServer1
+    Value: !Sub "http://${EIPWebServer1}/health"
+
+  HealthCheck2:
+    Description: URL health check WebServer2
+    Value: !Sub "http://${EIPWebServer2}/health"
