@@ -4,7 +4,10 @@
         {
             "Effect": "Allow",
             "Principal": {
-                "AWS": "arn:aws:iam::753668406235:root"
+                "AWS": [
+                    "arn:aws:iam::753668406235:role/S3CrossAccountAccess-AlumnoB",
+                    "arn:aws:iam::753668406235:root"
+                ]
             },
             "Action": [
                 "s3:PutObject",
@@ -12,17 +15,21 @@
                 "s3:DeleteObject"
             ],
             "Resource": [
-                "arn:aws:s3:::buclet-practica-ufv-config/alumno-b/*",
-                "arn:aws:s3:::buclet-practica-ufv-config/templates/*"
+                "arn:aws:s3:::bucket-practica-ufv-spain/alumno-b/*",
+                "arn:aws:s3:::bucket-practica-ufv-spain/alumno-b/backup_alumno_b/*",
+                "arn:aws:s3:::bucket-practica-ufv-spain/templates/*"
             ]
         },
         {
             "Effect": "Allow",
             "Principal": {
-                "AWS": "arn:aws:iam::753668406235:root"
+                "AWS": [
+                    "arn:aws:iam::753668406235:role/S3CrossAccountAccess-AlumnoB",
+                    "arn:aws:iam::753668406235:root"
+                ]
             },
             "Action": "s3:ListBucket",
-            "Resource": "arn:aws:s3:::buclet-practica-ufv-config"
+            "Resource": "arn:aws:s3:::bucket-practica-ufv-spain"
         },
         {
             "Effect": "Allow",
@@ -34,7 +41,7 @@
                 "s3:GetObject",
                 "s3:DeleteObject"
             ],
-            "Resource": "arn:aws:s3:::buclet-practica-ufv-config/alumno-c/*"
+            "Resource": "arn:aws:s3:::bucket-practica-ufv-spain/alumno-c/*"
         },
         {
             "Effect": "Allow",
@@ -42,7 +49,7 @@
                 "AWS": "arn:aws:iam::858634655061:root"
             },
             "Action": "s3:ListBucket",
-            "Resource": "arn:aws:s3:::buclet-practica-ufv-config"
+            "Resource": "arn:aws:s3:::bucket-practica-ufv-spain"
         },
         {
             "Effect": "Allow",
@@ -54,7 +61,7 @@
                 "s3:GetObject",
                 "s3:DeleteObject"
             ],
-            "Resource": "arn:aws:s3:::buclet-practica-ufv-config/alumno-e/*"
+            "Resource": "arn:aws:s3:::bucket-practica-ufv-spain/alumno-e/*"
         },
         {
             "Effect": "Allow",
@@ -62,7 +69,27 @@
                 "AWS": "arn:aws:iam::330422589864:root"
             },
             "Action": "s3:ListBucket",
-            "Resource": "arn:aws:s3:::buclet-practica-ufv-config"
+            "Resource": "arn:aws:s3:::bucket-practica-ufv-spain"
+        },
+        {
+            "Effect": "Allow",
+            "Principal": {
+                "AWS": "arn:aws:iam::228768154257:root"
+            },
+            "Action": [
+                "s3:PutObject",
+                "s3:GetObject",
+                "s3:DeleteObject"
+            ],
+            "Resource": "arn:aws:s3:::bucket-practica-ufv-spain/alumno-d/*"
+        },
+        {
+            "Effect": "Allow",
+            "Principal": {
+                "AWS": "arn:aws:iam::228768154257:root"
+            },
+            "Action": "s3:ListBucket",
+            "Resource": "arn:aws:s3:::bucket-practica-ufv-spain"
         }
     ]
 }
