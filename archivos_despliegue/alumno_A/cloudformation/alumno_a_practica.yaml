@@ -26,7 +26,7 @@ Parameters:
   S3BucketName:
     Description: Nombre del bucket S3 con los scripts PowerShell
     Type: String
-    Default: buclet-practica-ufv-config
+    Default: bucket-practica-ufv-spain
 
 Resources:
 
@@ -136,8 +136,8 @@ Resources:
           $env:PATH = $env:PATH + ";C:\Program Files\Amazon\AWSCLIV2"
 
           # Descargar scripts desde S3
-          & "C:\Program Files\Amazon\AWSCLIV2\aws.exe" s3 cp s3://${S3BucketName}/alumno-a/scripts/DC01_Parte1_InstalarAD.ps1 C:\DC01_Parte1_InstalarAD.ps1 --region eu-west-1
-          & "C:\Program Files\Amazon\AWSCLIV2\aws.exe" s3 cp s3://${S3BucketName}/alumno-a/scripts/DC01_Parte2_Configurar.ps1 C:\DC01_Parte2_Configurar.ps1 --region eu-west-1
+          & "C:\Program Files\Amazon\AWSCLIV2\aws.exe" s3 cp s3://${S3BucketName}/alumno-a/scripts/DC01_Parte1_InstalarAD.ps1 C:\DC01_Parte1_InstalarAD.ps1 --region eu-south-2
+          & "C:\Program Files\Amazon\AWSCLIV2\aws.exe" s3 cp s3://${S3BucketName}/alumno-a/scripts/DC01_Parte2_Configurar.ps1 C:\DC01_Parte2_Configurar.ps1 --region eu-south-2
 
           # Ejecutar Parte 1
           & PowerShell.exe -ExecutionPolicy Bypass -File C:\DC01_Parte1_InstalarAD.ps1
