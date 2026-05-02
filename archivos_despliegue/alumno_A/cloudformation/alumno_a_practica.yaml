@@ -3,32 +3,26 @@ Description: >
   Practica UFV - eu-south-2 (Spain): Windows AD sobre VPC existente
   Windows Server 2025, t3.micro, IP privada fija 10.10.1.10
 
-# Explicación: Los parametros son valores que el usuario introduce al lanzar
-# el stack. CloudFormation los pide por pantalla antes de crear nada.
-# Asi el mismo template funciona para distintos entornos sin editar el YAML.
 Parameters:
 
-  # Nombre del par de claves (.pem) ya existente en tu cuenta AWS para conectarte por RDP
   KeyName:
     Description: Nombre del par de claves existente para EC2
     Type: AWS::EC2::KeyPair::KeyName
 
-  # Tu IP publica actual: solo esa IP podra conectarse por RDP al servidor
   MyIP:
     Description: Tu IP publica para acceso RDP (ejemplo 203.0.113.25/32)
     Type: String
 
-  # ID de la subnet publica 10.10.1.0/24 dentro de la VPC existente
+  VpcId:
+    Description: ID de tu VPC existente (proyecto-vpc 10.10.0.0/16)
+    Type: AWS::EC2::VPC::Id
+    Default: vpc-0c5d48a4d174c5c9b
+
   SubnetPublicaId:
     Description: ID de la subnet publica existente (10.10.1.0/24)
     Type: AWS::EC2::Subnet::Id
+    Default: subnet-0b4ae4cb4242c2acb
 
-  # ID del Security Group (firewall virtual) que controla el trafico de la instancia
-  SecurityGroupId:
-    Description: ID del Security Group existente en tu VPC
-    Type: AWS::EC2::SecurityGroup::Id
-
-  # Nombre del bucket S3 donde estan subidos los scripts PowerShell
   S3BucketName:
     Description: Nombre del bucket S3 con los scripts PowerShell
     Type: String
@@ -38,15 +32,12 @@ Resources:
 
   # -------------------------------------------------------
   # ROL IAM PARA EC2
-  # Explicación: Un rol IAM es un "pase de acceso" que le damos a la instancia
-  # para que pueda usar otros servicios AWS sin credenciales hardcodeadas.
-  # En este caso le permite leer del bucket S3 para descargar los scripts.
+  # Permite a la instancia acceder a S3 sin credenciales hardcodeadas
   # -------------------------------------------------------
   RolEC2S3Spain:
     Type: AWS::IAM::Role
     Properties:
       RoleName: rol-ec2-s3-ufv-spain
-      # AssumeRolePolicyDocument define quien puede usar este rol (solo instancias EC2)
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -54,12 +45,9 @@ Resources:
             Principal:
               Service: ec2.amazonaws.com
             Action: sts:AssumeRole
-      # Politica gestionada por AWS que da acceso completo a S3
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/AmazonS3FullAccess
 
-  # Explicación: El InstanceProfile es el contenedor que asocia el rol IAM a la
-  # instancia EC2. No se puede asignar un rol directamente, siempre es a traves de aqui.
   InstanceProfileEC2Spain:
     Type: AWS::IAM::InstanceProfile
     Properties:
@@ -68,90 +56,109 @@ Resources:
         - !Ref RolEC2S3Spain
 
   # -------------------------------------------------------
+  # SECURITY GROUP PROPIO
+  # Explicación: Creamos el SG dentro del stack usando el VpcId como parametro.
+  # Asi CloudFormation lo asocia correctamente a la VPC y no al default.
+  # -------------------------------------------------------
+  SGWindowsAD:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: SG-Windows-AD-UFV
+      GroupDescription: Security Group Windows AD Practica UFV
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        # RDP solo desde tu IP
+        - IpProtocol: tcp
+          FromPort: 3389
+          ToPort: 3389
+          CidrIp: !Ref MyIP
+          Description: RDP desde IP del administrador
+        # Todo el trafico interno de la VPC (necesario para AD, DNS, DHCP, Kerberos)
+        - IpProtocol: -1
+          CidrIp: 10.10.0.0/16
+          Description: Trafico interno VPC
+        # Trafico desde VPCs del equipo via peering (10.20-50.0.0/16)
+        - IpProtocol: -1
+          CidrIp: 10.0.0.0/8
+          Description: Trafico desde VPCs del equipo via peering
+        # HTTPS para descargar AWS CLI y scripts desde S3
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: HTTPS saliente para S3 y actualizaciones
+      Tags:
+        - Key: Name
+          Value: SG-Windows-AD-UFV
+
+  # -------------------------------------------------------
   # ELASTIC IP
-  # Explicación: Por defecto las instancias cambian de IP publica al reiniciarse.
-  # Una Elastic IP es una IP publica fija que se mantiene aunque la instancia pare.
+  # IP publica fija que no cambia aunque la instancia se reinicie
   # -------------------------------------------------------
   ElasticIPWindowsSpain:
     Type: AWS::EC2::EIP
     Properties:
-      Domain: vpc   # indica que la EIP es para usarla dentro de una VPC
+      Domain: vpc
 
   # -------------------------------------------------------
   # EC2 WINDOWS SERVER 2025 - Controlador de Dominio
-  # Explicación: Esta es la maquina virtual que actuara como servidor AD.
-  # Al arrancar ejecuta automaticamente los scripts via UserData.
   # -------------------------------------------------------
   EC2WindowsSpain:
     Type: AWS::EC2::Instance
+    DependsOn: SGWindowsAD
     Properties:
-      # AMI de Windows Server 2025 en la region eu-south-2
       ImageId: ami-07bda9eb187fd0680
-      # t3.micro: 2 vCPU, 1 GB RAM. Suficiente para un DC de laboratorio
       InstanceType: t3.micro
       KeyName: !Ref KeyName
       SubnetId: !Ref SubnetPublicaId
-      # IP privada fija: el DC siempre debe tener la misma IP para que los
-      # demas equipos de la red sepan donde encontrarlo
       PrivateIpAddress: 10.10.1.10
       IamInstanceProfile: !Ref InstanceProfileEC2Spain
       SecurityGroupIds:
-        - !Ref SecurityGroupId
+        - !Ref SGWindowsAD
       Tags:
         - Key: Name
           Value: EC2-Windows-AD-Spain
-      # Explicación: UserData es un script que AWS ejecuta UNA SOLA VEZ la primera
-      # vez que la instancia arranca. Es el punto de entrada de la automatizacion.
-      # Fn::Base64 codifica el contenido porque AWS lo requiere en ese formato.
-      # !Sub permite usar variables como ${S3BucketName} dentro del texto.
       UserData:
         Fn::Base64: !Sub |
           <powershell>
-          # Si este fichero ya existe, el script ya se ejecuto antes: salimos
+          # Evitar ejecucion multiple
           if (Test-Path "C:\AD_USERDATA_EJECUTADO.txt") { exit }
           "done" | Out-File "C:\AD_USERDATA_EJECUTADO.txt"
 
-          # Esperar a que el sistema termine de arrancar antes de ejecutar comandos
           Start-Sleep -Seconds 30
-
-          # Desactivar restricciones de ejecucion de scripts de PowerShell
           Set-ExecutionPolicy Bypass -Scope LocalMachine -Force
 
-          # Instalar AWS CLI para poder usar el comando aws s3 cp
+          # Instalar AWS CLI
           $awsCliUrl = "https://awscli.amazonaws.com/AWSCLIV2.msi"
           $awsCliInstaller = "C:\AWSCLIV2.msi"
           Invoke-WebRequest -Uri $awsCliUrl -OutFile $awsCliInstaller
           Start-Process msiexec.exe -ArgumentList "/i $awsCliInstaller /quiet" -Wait
-
-          # Añadir la ruta de AWS CLI al PATH de esta sesion de PowerShell
           $env:PATH = $env:PATH + ";C:\Program Files\Amazon\AWSCLIV2"
 
           # Descargar scripts desde S3
-          # Explicación: ${S3BucketName} se reemplaza por el valor del parametro introducido
-          & "C:\Program Files\Amazon\AWSCLIV2\aws.exe" s3 cp s3://${S3BucketName}/DC01_Parte1_InstalarAD.ps1 C:\DC01_Parte1_InstalarAD.ps1 --region eu-west-1
-          & "C:\Program Files\Amazon\AWSCLIV2\aws.exe" s3 cp s3://${S3BucketName}/DC01_Parte2_Configurar.ps1 C:\DC01_Parte2_Configurar.ps1 --region eu-west-1
+          & "C:\Program Files\Amazon\AWSCLIV2\aws.exe" s3 cp s3://${S3BucketName}/alumno-a/scripts/DC01_Parte1_InstalarAD.ps1 C:\DC01_Parte1_InstalarAD.ps1 --region eu-west-1
+          & "C:\Program Files\Amazon\AWSCLIV2\aws.exe" s3 cp s3://${S3BucketName}/alumno-a/scripts/DC01_Parte2_Configurar.ps1 C:\DC01_Parte2_Configurar.ps1 --region eu-west-1
 
-          # Ejecutar Parte 1 (instalara AD, programara la Parte 2 y reiniciara la maquina)
+          # Ejecutar Parte 1
           & PowerShell.exe -ExecutionPolicy Bypass -File C:\DC01_Parte1_InstalarAD.ps1
           </powershell>
 
-  # Asociar la Elastic IP a la instancia para que siempre tenga la misma IP publica
   EIPAssociationWindowsSpain:
     Type: AWS::EC2::EIPAssociation
     Properties:
       InstanceId: !Ref EC2WindowsSpain
       EIP: !Ref ElasticIPWindowsSpain
 
-# Explicación: Los Outputs son los valores que CloudFormation muestra al terminar
-# de crear el stack. Utiles para saber rapidamente la IP a la que conectarse por RDP.
 Outputs:
 
-  # IP publica del servidor (la Elastic IP asignada)
   ElasticIPAD:
     Description: IP publica del Windows AD
     Value: !Ref ElasticIPWindowsSpain
 
-  # IP privada del servidor dentro de la VPC
   PrivateIPAD:
     Description: IP privada del Windows AD
     Value: 10.10.1.10
+
+  SecurityGroupId:
+    Description: ID del Security Group creado
+    Value: !Ref SGWindowsAD

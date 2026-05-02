@@ -1,0 +1,631 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Alumno E (Juan Torres) - 2 Web Servers Linux para modulo /practicas
+  Amazon Linux 2023, t3.micro, eu-south-2
+  Nginx + Node.js Express + NTP sincronizado con AD (10.10.1.10)
+
+Parameters:
+
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: Nombre del Key Pair en eu-south-2
+    Default: clave-alumnoE
+
+  ADIP:
+    Type: String
+    Description: IP privada del Active Directory para NTP
+    Default: "10.10.1.10"
+
+  DBIP:
+    Type: String
+    Description: IP privada del servidor de base de datos (Alumno B)
+    Default: "10.20.0.0"
+
+  DBName:
+    Type: String
+    Description: Nombre de la base de datos
+    Default: "practica_db"
+
+  DBUser:
+    Type: String
+    Description: Usuario de la base de datos para el modulo practicas
+    Default: "alumno_e"
+
+  DBPass:
+    Type: String
+    Description: Contrasena de la base de datos
+    Default: "Airbusds2026!"
+    NoEcho: true
+
+Resources:
+
+  # -------------------------------------------------------
+  # ROL IAM para acceso a S3 sin credenciales hardcodeadas
+  # -------------------------------------------------------
+  RolEC2S3AlumnoE:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: rol-ec2-s3-torres
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+
+  InstanceProfileAlumnoE:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: perfil-ec2-s3-torres
+      Roles:
+        - !Ref RolEC2S3AlumnoE
+
+  # -------------------------------------------------------
+  # Security Group
+  # -------------------------------------------------------
+  SGWebServerE:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: SG Web Servers Alumno E - modulo practicas
+      VpcId: vpc-07507f0d4892ca1e3
+      SecurityGroupIngress:
+        # SSH para administracion
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+          Description: SSH administracion
+        # HTTP desde cualquier lugar (Load Balancer)
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: HTTP Load Balancer
+        # Puerto 3000 Node.js desde la VPC
+        - IpProtocol: tcp
+          FromPort: 3000
+          ToPort: 3000
+          CidrIp: 0.0.0.0/0
+          Description: Node.js backend
+        # NTP UDP hacia el AD
+        - IpProtocol: udp
+          FromPort: 123
+          ToPort: 123
+          CidrIp: 0.0.0.0/0
+          Description: NTP
+        # Todo el trafico interno 10.x.x.x (VPCs del equipo via peering)
+        - IpProtocol: -1
+          CidrIp: 10.0.0.0/8
+          Description: Trafico interno equipo via peering
+      Tags:
+        - Key: Name
+          Value: SG-WebServer-AlumnoE
+
+  # -------------------------------------------------------
+  # Elastic IPs
+  # -------------------------------------------------------
+  EIPWebServer1E:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  EIPWebServer2E:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  # -------------------------------------------------------
+  # Web Server 1 - Alumno E
+  # -------------------------------------------------------
+  WebServer1E:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.micro
+      ImageId: ami-048dc219ff68b99b1
+      KeyName: !Ref KeyPairName
+      IamInstanceProfile: !Ref InstanceProfileAlumnoE
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: false
+          DeviceIndex: '0'
+          SubnetId: subnet-0cf377e154b4555df
+          GroupSet:
+            - !Ref SGWebServerE
+      Tags:
+        - Key: Name
+          Value: WebServer1-AlumnoE-Practicas
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -e
+          exec > /var/log/userdata.log 2>&1
+
+          echo "=== Iniciando configuracion WebServer1 AlumnoE ==="
+
+          # ── Actualizar sistema e instalar dependencias ──
+          dnf update -y
+          dnf install -y nginx chrony nodejs npm postgresql15
+
+          # ── Configurar NTP con el AD ──
+          cat > /etc/chrony.conf << 'CHRONY'
+          server ${ADIP} iburst prefer
+          server 0.pool.ntp.org iburst
+          driftfile /var/lib/chrony/drift
+          makestep 1.0 3
+          rtcsync
+          CHRONY
+          systemctl enable --now chronyd
+          sleep 5
+          chronyc makestep || true
+
+          # ── Crear estructura de la aplicacion Node.js ──
+          mkdir -p /opt/app-practicas
+          cd /opt/app-practicas
+
+          # package.json
+          cat > /opt/app-practicas/package.json << 'PKGJSON'
+          {
+            "name": "app-practicas",
+            "version": "1.0.0",
+            "main": "server.js",
+            "dependencies": {
+              "express": "^4.18.2",
+              "pg": "^8.11.0",
+              "cors": "^2.8.5",
+              "multer": "^1.4.5-lts.1",
+              "aws-sdk": "^2.1400.0"
+            }
+          }
+          PKGJSON
+
+          # Instalar dependencias Node.js
+          cd /opt/app-practicas && npm install
+
+          # ── Crear servidor backend server.js ──
+          cat > /opt/app-practicas/server.js << 'NODEJSAPP'
+          const express = require('express');
+          const { Pool } = require('pg');
+          const cors = require('cors');
+          const path = require('path');
+
+          const app = express();
+          app.use(express.json());
+          app.use(cors());
+          app.use(express.static(path.join(__dirname, 'public')));
+
+          const pool = new Pool({
+            host: process.env.DB_HOST || '${DBIP}',
+            user: process.env.DB_USER || '${DBUser}',
+            password: process.env.DB_PASS || '${DBPass}',
+            database: process.env.DB_NAME || '${DBName}',
+            port: 5432
+          });
+
+          // GET /practicas — listar todas las practicas
+          app.get('/practicas', async (req, res) => {
+            try {
+              const result = await pool.query(
+                'SELECT p.*, COUNT(e.id) AS num_entregas FROM practicas p LEFT JOIN entregas e ON e.practica_id = p.id GROUP BY p.id ORDER BY p.created_at DESC'
+              );
+              res.json(result.rows);
+            } catch (err) {
+              res.status(500).json({ error: err.message });
+            }
+          });
+
+          // POST /practicas — crear practica
+          app.post('/practicas', async (req, res) => {
+            const { titulo, descripcion, asignatura_id, fecha_limite } = req.body;
+            try {
+              const result = await pool.query(
+                'INSERT INTO practicas (titulo, descripcion, asignatura_id, fecha_limite) VALUES ($1,$2,$3,$4) RETURNING *',
+                [titulo, descripcion, asignatura_id, fecha_limite]
+              );
+              res.status(201).json(result.rows[0]);
+            } catch (err) {
+              res.status(500).json({ error: err.message });
+            }
+          });
+
+          // GET /practicas/:id/entregas — ver entregas de una practica
+          app.get('/practicas/:id/entregas', async (req, res) => {
+            try {
+              const result = await pool.query(
+                'SELECT * FROM entregas WHERE practica_id = $1 ORDER BY fecha_entrega DESC',
+                [req.params.id]
+              );
+              res.json(result.rows);
+            } catch (err) {
+              res.status(500).json({ error: err.message });
+            }
+          });
+
+          // POST /practicas/:id/entregas — crear entrega
+          app.post('/practicas/:id/entregas', async (req, res) => {
+            const { alumno_id, comentarios } = req.body;
+            try {
+              const result = await pool.query(
+                'INSERT INTO entregas (practica_id, alumno_id, comentarios) VALUES ($1,$2,$3) RETURNING *',
+                [req.params.id, alumno_id, comentarios]
+              );
+              res.status(201).json(result.rows[0]);
+            } catch (err) {
+              res.status(500).json({ error: err.message });
+            }
+          });
+
+          // Health check
+          app.get('/health', (req, res) => {
+            res.json({ status: 'ok', servidor: 'WebServer1-AlumnoE', modulo: 'practicas' });
+          });
+
+          app.listen(3000, () => console.log('Servidor practicas corriendo en puerto 3000'));
+          NODEJSAPP
+
+          # ── Crear frontend public/index.html ──
+          mkdir -p /opt/app-practicas/public
+          cat > /opt/app-practicas/public/index.html << 'HTMLAPP'
+          <!DOCTYPE html>
+          <html lang="es">
+          <head>
+            <meta charset="UTF-8">
+            <title>Modulo Practicas</title>
+            <style>
+              body { font-family: Arial, sans-serif; max-width: 900px; margin: 40px auto; padding: 0 20px; }
+              h1 { color: #333; border-bottom: 2px solid #4A90D9; padding-bottom: 10px; }
+              h2 { color: #4A90D9; }
+              table { width: 100%; border-collapse: collapse; margin: 20px 0; }
+              th { background: #4A90D9; color: white; padding: 10px; }
+              td { padding: 8px; border-bottom: 1px solid #ddd; }
+              tr:hover { background: #f5f5f5; }
+              form { background: #f9f9f9; padding: 20px; border-radius: 8px; margin: 20px 0; }
+              input, textarea { width: 100%; padding: 8px; margin: 5px 0 15px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
+              button { background: #4A90D9; color: white; padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; }
+              button:hover { background: #357ABD; }
+              .badge { background: #e0f0ff; color: #4A90D9; padding: 2px 8px; border-radius: 10px; }
+            </style>
+          </head>
+          <body>
+            <h1>Modulo de Practicas de Laboratorio</h1>
+            <h2>Practicas disponibles</h2>
+            <table id="tabla-practicas">
+              <thead><tr><th>ID</th><th>Titulo</th><th>Fecha limite</th><th>Entregas</th></tr></thead>
+              <tbody></tbody>
+            </table>
+            <h2>Crear nueva practica</h2>
+            <form id="form-practica">
+              <label>Titulo</label><input type="text" id="titulo" required>
+              <label>Descripcion</label><textarea id="descripcion" rows="3"></textarea>
+              <label>ID Asignatura</label><input type="number" id="asignatura_id">
+              <label>Fecha limite</label><input type="date" id="fecha_limite">
+              <button type="submit">Crear practica</button>
+            </form>
+            <h2>Subir entrega</h2>
+            <form id="form-entrega">
+              <label>ID de la practica</label><input type="number" id="practica_id" required>
+              <label>ID del alumno</label><input type="number" id="alumno_id" required>
+              <label>Comentarios</label><textarea id="comentarios" rows="2"></textarea>
+              <button type="submit">Enviar entrega</button>
+            </form>
+            <div id="mensaje" style="margin-top:15px;color:green;font-weight:bold;"></div>
+            <script>
+              const BASE = '/practicas';
+              const msg = document.getElementById('mensaje');
+              async function cargarPracticas() {
+                const res = await fetch(BASE);
+                const data = await res.json();
+                const tbody = document.querySelector('#tabla-practicas tbody');
+                tbody.innerHTML = data.map(p =>
+                  '<tr><td>' + p.id + '</td><td>' + p.titulo + '</td><td>' + (p.fecha_limite ? p.fecha_limite.substring(0,10) : '-') + '</td><td><span class="badge">' + p.num_entregas + '</span></td></tr>'
+                ).join('');
+              }
+              document.getElementById('form-practica').addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const body = { titulo: document.getElementById('titulo').value, descripcion: document.getElementById('descripcion').value, asignatura_id: document.getElementById('asignatura_id').value, fecha_limite: document.getElementById('fecha_limite').value };
+                const res = await fetch(BASE, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+                if (res.ok) { msg.textContent = 'Practica creada correctamente'; cargarPracticas(); }
+              });
+              document.getElementById('form-entrega').addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const practica_id = document.getElementById('practica_id').value;
+                const body = { alumno_id: document.getElementById('alumno_id').value, comentarios: document.getElementById('comentarios').value };
+                const res = await fetch(BASE + '/' + practica_id + '/entregas', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+                if (res.ok) { msg.textContent = 'Entrega enviada correctamente'; cargarPracticas(); }
+              });
+              cargarPracticas();
+            </script>
+          </body>
+          </html>
+          HTMLAPP
+
+          # ── Crear servicio systemd para Node.js ──
+          cat > /etc/systemd/system/node-practicas.service << 'SERVICE'
+          [Unit]
+          Description=Node.js App Practicas AlumnoE
+          After=network.target
+
+          [Service]
+          User=root
+          WorkingDirectory=/opt/app-practicas
+          Environment="DB_HOST=${DBIP}"
+          Environment="DB_NAME=${DBName}"
+          Environment="DB_USER=${DBUser}"
+          Environment="DB_PASS=${DBPass}"
+          ExecStart=/usr/bin/node /opt/app-practicas/server.js
+          Restart=always
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+          SERVICE
+
+          systemctl enable --now node-practicas
+
+          # ── Configurar Nginx como reverse proxy ──
+          cat > /etc/nginx/conf.d/practicas.conf << 'NGINX'
+          server {
+              listen 80;
+              server_name _;
+
+              location /practicas {
+                  proxy_pass http://127.0.0.1:3000;
+                  proxy_http_version 1.1;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              }
+
+              location /health {
+                  proxy_pass http://127.0.0.1:3000;
+              }
+          }
+          NGINX
+
+          rm -f /etc/nginx/conf.d/default.conf
+          # Deshabilitar server block por defecto en nginx.conf
+          sudo sed -i 's/listen       80;/#listen       80;/g' /etc/nginx/nginx.conf
+          sudo sed -i 's/listen       \[::]:80;/#listen       [::]:80;/g' /etc/nginx/nginx.conf
+          systemctl enable --now nginx
+          systemctl restart nginx
+
+          echo "WebServer1-AlumnoE configurado correctamente" > /tmp/setup_done.txt
+          echo "=== Configuracion completada ==="
+
+  EIPAssociation1E:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      InstanceId: !Ref WebServer1E
+      EIP: !Ref EIPWebServer1E
+
+  # -------------------------------------------------------
+  # Web Server 2 - Alumno E (redundancia)
+  # -------------------------------------------------------
+  WebServer2E:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.micro
+      ImageId: ami-048dc219ff68b99b1
+      KeyName: !Ref KeyPairName
+      IamInstanceProfile: !Ref InstanceProfileAlumnoE
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: false
+          DeviceIndex: '0'
+          SubnetId: subnet-0cf377e154b4555df
+          GroupSet:
+            - !Ref SGWebServerE
+      Tags:
+        - Key: Name
+          Value: WebServer2-AlumnoE-Practicas
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -e
+          exec > /var/log/userdata.log 2>&1
+
+          echo "=== Iniciando configuracion WebServer2 AlumnoE ==="
+
+          dnf update -y
+          dnf install -y nginx chrony nodejs npm postgresql15
+
+          # ── Configurar NTP ──
+          cat > /etc/chrony.conf << 'CHRONY'
+          server ${ADIP} iburst prefer
+          server 0.pool.ntp.org iburst
+          driftfile /var/lib/chrony/drift
+          makestep 1.0 3
+          rtcsync
+          CHRONY
+          systemctl enable --now chronyd
+          sleep 5
+          chronyc makestep || true
+
+          # ── Crear aplicacion Node.js ──
+          mkdir -p /opt/app-practicas
+          cd /opt/app-practicas
+
+          cat > /opt/app-practicas/package.json << 'PKGJSON'
+          {
+            "name": "app-practicas",
+            "version": "1.0.0",
+            "main": "server.js",
+            "dependencies": {
+              "express": "^4.18.2",
+              "pg": "^8.11.0",
+              "cors": "^2.8.5"
+            }
+          }
+          PKGJSON
+
+          cd /opt/app-practicas && npm install
+
+          cat > /opt/app-practicas/server.js << 'NODEJSAPP'
+          const express = require('express');
+          const { Pool } = require('pg');
+          const cors = require('cors');
+          const path = require('path');
+
+          const app = express();
+          app.use(express.json());
+          app.use(cors());
+          app.use(express.static(path.join(__dirname, 'public')));
+
+          const pool = new Pool({
+            host: process.env.DB_HOST || '${DBIP}',
+            user: process.env.DB_USER || '${DBUser}',
+            password: process.env.DB_PASS || '${DBPass}',
+            database: process.env.DB_NAME || '${DBName}',
+            port: 5432
+          });
+
+          app.get('/practicas', async (req, res) => {
+            try {
+              const result = await pool.query(
+                'SELECT p.*, COUNT(e.id) AS num_entregas FROM practicas p LEFT JOIN entregas e ON e.practica_id = p.id GROUP BY p.id ORDER BY p.created_at DESC'
+              );
+              res.json(result.rows);
+            } catch (err) {
+              res.status(500).json({ error: err.message });
+            }
+          });
+
+          app.post('/practicas', async (req, res) => {
+            const { titulo, descripcion, asignatura_id, fecha_limite } = req.body;
+            try {
+              const result = await pool.query(
+                'INSERT INTO practicas (titulo, descripcion, asignatura_id, fecha_limite) VALUES ($1,$2,$3,$4) RETURNING *',
+                [titulo, descripcion, asignatura_id, fecha_limite]
+              );
+              res.status(201).json(result.rows[0]);
+            } catch (err) {
+              res.status(500).json({ error: err.message });
+            }
+          });
+
+          app.get('/practicas/:id/entregas', async (req, res) => {
+            try {
+              const result = await pool.query(
+                'SELECT * FROM entregas WHERE practica_id = $1 ORDER BY fecha_entrega DESC',
+                [req.params.id]
+              );
+              res.json(result.rows);
+            } catch (err) {
+              res.status(500).json({ error: err.message });
+            }
+          });
+
+          app.post('/practicas/:id/entregas', async (req, res) => {
+            const { alumno_id, comentarios } = req.body;
+            try {
+              const result = await pool.query(
+                'INSERT INTO entregas (practica_id, alumno_id, comentarios) VALUES ($1,$2,$3) RETURNING *',
+                [req.params.id, alumno_id, comentarios]
+              );
+              res.status(201).json(result.rows[0]);
+            } catch (err) {
+              res.status(500).json({ error: err.message });
+            }
+          });
+
+          app.get('/health', (req, res) => {
+            res.json({ status: 'ok', servidor: 'WebServer2-AlumnoE', modulo: 'practicas' });
+          });
+
+          app.listen(3000, () => console.log('Servidor practicas corriendo en puerto 3000'));
+          NODEJSAPP
+
+          mkdir -p /opt/app-practicas/public
+          cat > /opt/app-practicas/public/index.html << 'HTMLAPP'
+          <!DOCTYPE html>
+          <html lang="es">
+          <head><meta charset="UTF-8"><title>Practicas WS2</title></head>
+          <body><h1>Web Server 2 - Modulo Practicas</h1><p>Servidor de respaldo operativo.</p></body>
+          </html>
+          HTMLAPP
+
+          cat > /etc/systemd/system/node-practicas.service << 'SERVICE'
+          [Unit]
+          Description=Node.js App Practicas AlumnoE WS2
+          After=network.target
+
+          [Service]
+          User=root
+          WorkingDirectory=/opt/app-practicas
+          Environment="DB_HOST=${DBIP}"
+          Environment="DB_NAME=${DBName}"
+          Environment="DB_USER=${DBUser}"
+          Environment="DB_PASS=${DBPass}"
+          ExecStart=/usr/bin/node /opt/app-practicas/server.js
+          Restart=always
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+          SERVICE
+
+          systemctl enable --now node-practicas
+
+          cat > /etc/nginx/conf.d/practicas.conf << 'NGINX'
+          server {
+              listen 80;
+              server_name _;
+
+              location /practicas {
+                  proxy_pass http://127.0.0.1:3000;
+                  proxy_http_version 1.1;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+              }
+
+              location /health {
+                  proxy_pass http://127.0.0.1:3000;
+              }
+          }
+          NGINX
+
+          rm -f /etc/nginx/conf.d/default.conf
+          # Deshabilitar server block por defecto en nginx.conf
+          sudo sed -i 's/listen       80;/#listen       80;/g' /etc/nginx/nginx.conf
+          sudo sed -i 's/listen       \[::]:80;/#listen       [::]:80;/g' /etc/nginx/nginx.conf
+          systemctl enable --now nginx
+          systemctl restart nginx
+
+          echo "WebServer2-AlumnoE configurado correctamente" > /tmp/setup_done.txt
+          echo "=== Configuracion completada ==="
+
+  EIPAssociation2E:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      InstanceId: !Ref WebServer2E
+      EIP: !Ref EIPWebServer2E
+
+Outputs:
+
+  WebServer1IP:
+    Description: IP publica WebServer1 (dar al Load Balancer)
+    Value: !Ref EIPWebServer1E
+
+  WebServer2IP:
+    Description: IP publica WebServer2 (dar al Load Balancer)
+    Value: !Ref EIPWebServer2E
+
+  WebServer1PrivateIP:
+    Description: IP privada WebServer1 (para peering interno)
+    Value: !GetAtt WebServer1E.PrivateIp
+
+  WebServer2PrivateIP:
+    Description: IP privada WebServer2 (para peering interno)
+    Value: !GetAtt WebServer2E.PrivateIp
+
+  HealthCheck1:
+    Description: URL health check WebServer1
+    Value: !Sub "http://${EIPWebServer1E}/health"
+
+  HealthCheck2:
+    Description: URL health check WebServer2
+    Value: !Sub "http://${EIPWebServer2E}/health"
+
+  RolIAM:
+    Description: ARN del rol IAM para acceso S3 cross-account
+    Value: !GetAtt RolEC2S3AlumnoE.Arn

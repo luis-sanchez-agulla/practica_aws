@@ -1,0 +1,68 @@
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Principal": {
+                "AWS": "arn:aws:iam::753668406235:root"
+            },
+            "Action": [
+                "s3:PutObject",
+                "s3:GetObject",
+                "s3:DeleteObject"
+            ],
+            "Resource": [
+                "arn:aws:s3:::buclet-practica-ufv-config/alumno-b/*",
+                "arn:aws:s3:::buclet-practica-ufv-config/templates/*"
+            ]
+        },
+        {
+            "Effect": "Allow",
+            "Principal": {
+                "AWS": "arn:aws:iam::753668406235:root"
+            },
+            "Action": "s3:ListBucket",
+            "Resource": "arn:aws:s3:::buclet-practica-ufv-config"
+        },
+        {
+            "Effect": "Allow",
+            "Principal": {
+                "AWS": "arn:aws:iam::858634655061:root"
+            },
+            "Action": [
+                "s3:PutObject",
+                "s3:GetObject",
+                "s3:DeleteObject"
+            ],
+            "Resource": "arn:aws:s3:::buclet-practica-ufv-config/alumno-c/*"
+        },
+        {
+            "Effect": "Allow",
+            "Principal": {
+                "AWS": "arn:aws:iam::858634655061:root"
+            },
+            "Action": "s3:ListBucket",
+            "Resource": "arn:aws:s3:::buclet-practica-ufv-config"
+        },
+        {
+            "Effect": "Allow",
+            "Principal": {
+                "AWS": "arn:aws:iam::330422589864:root"
+            },
+            "Action": [
+                "s3:PutObject",
+                "s3:GetObject",
+                "s3:DeleteObject"
+            ],
+            "Resource": "arn:aws:s3:::buclet-practica-ufv-config/alumno-e/*"
+        },
+        {
+            "Effect": "Allow",
+            "Principal": {
+                "AWS": "arn:aws:iam::330422589864:root"
+            },
+            "Action": "s3:ListBucket",
+            "Resource": "arn:aws:s3:::buclet-practica-ufv-config"
+        }
+    ]
+}
