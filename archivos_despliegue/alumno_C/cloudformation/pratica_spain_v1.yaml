@@ -1,29 +1,72 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
-  Alumno C - 2 Web Servers Linux para modulo /alumnos
+  Alumno C (Daniel Minguito) - 2 Web Servers Linux modulo /alumnos
   Amazon Linux 2023, t3.micro, eu-south-2
-  Nginx + Python Flask + NTP sincronizado con AD
+  Nginx + Flask + NTP con AD + BD Alumno B
 
 Parameters:
+
   KeyPairName:
     Type: AWS::EC2::KeyPair::KeyName
-    Description: Nombre del Key Pair
     Default: keypair_alumnoC
 
   ADIP:
     Type: String
-    Description: IP privada del Active Directory para NTP
     Default: "10.10.1.10"
+    Description: IP del Active Directory para NTP
 
   DBIP:
     Type: String
-    Description: IP privada del servidor de base de datos
-    Default: "10.20.0.0"
+    Default: "10.20.2.45"
+    Description: IP privada del servidor PostgreSQL (Alumno B)
+
+  DBName:
+    Type: String
+    Default: "universidad"
+
+  DBUser:
+    Type: String
+    Default: "app_user"
+
+  DBPass:
+    Type: String
+    Default: "app_password"
+    NoEcho: true
+
+  LBIP:
+    Type: String
+    Default: "10.20.1.153"
+    Description: IP privada del Load Balancer (Alumno B)
 
 Resources:
 
   # -------------------------------------------------------
-  # Security Group Web Servers
+  # ROL IAM
+  # -------------------------------------------------------
+  RolEC2S3AlumnoC:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: rol-ec2-s3-minguito
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+
+  InstanceProfileAlumnoC:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: perfil-ec2-s3-minguito
+      Roles:
+        - !Ref RolEC2S3AlumnoC
+
+  # -------------------------------------------------------
+  # Security Group
+  # Solo acepta trafico HTTP desde el Load Balancer (10.20.1.153)
   # -------------------------------------------------------
   SGWebServerC:
     Type: AWS::EC2::SecurityGroup
@@ -31,27 +74,27 @@ Resources:
       GroupDescription: SG Web Servers Alumno C
       VpcId: vpc-088606d90ab567b3d
       SecurityGroupIngress:
-        # SSH desde cualquier lugar
+        # SSH para administracion
         - IpProtocol: tcp
           FromPort: 22
           ToPort: 22
           CidrIp: 0.0.0.0/0
-        # HTTP desde cualquier lugar (Load Balancer)
+        # HTTP solo desde el Load Balancer
         - IpProtocol: tcp
           FromPort: 80
           ToPort: 80
-          CidrIp: 0.0.0.0/0
-        # Puerto 5000 Flask desde la VPC
+          CidrIp: !Sub "${LBIP}/32"
+        # Flask solo desde la VPC interna
         - IpProtocol: tcp
           FromPort: 5000
           ToPort: 5000
-          CidrIp: 0.0.0.0/0
-        # NTP saliente hacia AD
+          CidrIp: 10.20.0.0/16
+        # NTP
         - IpProtocol: udp
           FromPort: 123
           ToPort: 123
           CidrIp: 0.0.0.0/0
-        # Todo el trafico interno VPC
+        # Todo el trafico interno del equipo
         - IpProtocol: -1
           CidrIp: 10.0.0.0/8
       Tags:
@@ -72,7 +115,7 @@ Resources:
       Domain: vpc
 
   # -------------------------------------------------------
-  # Web Server 1 - Alumno C
+  # Web Server 1
   # -------------------------------------------------------
   WebServer1:
     Type: AWS::EC2::Instance
@@ -80,6 +123,7 @@ Resources:
       InstanceType: t3.micro
       ImageId: ami-048dc219ff68b99b1
       KeyName: !Ref KeyPairName
+      IamInstanceProfile: !Ref InstanceProfileAlumnoC
       NetworkInterfaces:
         - AssociatePublicIpAddress: false
           DeviceIndex: '0'
@@ -95,11 +139,10 @@ Resources:
           set -e
           exec > /var/log/userdata.log 2>&1
 
-          # ── Actualizar sistema ──
           dnf update -y
           dnf install -y nginx python3 python3-pip chrony postgresql15
 
-          # ── Configurar NTP con el AD ──
+          # NTP con el AD
           cat > /etc/chrony.conf << 'CHRONY'
           server ${ADIP} iburst prefer
           server 0.pool.ntp.org iburst
@@ -108,136 +151,111 @@ Resources:
           rtcsync
           CHRONY
           systemctl enable --now chronyd
-          chronyc makestep
+          chronyc makestep || true
 
-          # ── Instalar dependencias Python ──
+          # Flask
           pip3 install flask psycopg2-binary flask-cors
 
-          # ── Crear aplicacion Flask modulo /alumnos ──
           mkdir -p /opt/app
           cat > /opt/app/app.py << 'PYAPP'
           from flask import Flask, jsonify, request
           from flask_cors import CORS
-          import psycopg2
-          import os
+          import psycopg2, os
 
           app = Flask(__name__)
           CORS(app)
 
-          DB_HOST = os.environ.get('DB_HOST', '${DBIP}')
-          DB_NAME = os.environ.get('DB_NAME', 'practica_db')
-          DB_USER = os.environ.get('DB_USER', 'alumno_c')
-          DB_PASS = os.environ.get('DB_PASS', 'Airbusds2026!')
-
           def get_db():
               return psycopg2.connect(
-                  host=DB_HOST, database=DB_NAME,
-                  user=DB_USER, password=DB_PASS
+                  host=os.environ.get('DB_HOST','${DBIP}'),
+                  database=os.environ.get('DB_NAME','${DBName}'),
+                  user=os.environ.get('DB_USER','${DBUser}'),
+                  password=os.environ.get('DB_PASS','${DBPass}'),
+                  port=5432
               )
 
           @app.route('/alumnos', methods=['GET'])
           def get_alumnos():
               try:
-                  conn = get_db()
-                  cur = conn.cursor()
+                  conn=get_db(); cur=conn.cursor()
                   cur.execute("SELECT id, nombre, correo FROM alumnos ORDER BY nombre")
-                  rows = cur.fetchall()
-                  cur.close()
-                  conn.close()
-                  return jsonify([{"id": r[0], "nombre": r[1], "correo": r[2]} for r in rows])
+                  rows=cur.fetchall(); cur.close(); conn.close()
+                  return jsonify([{"id":r[0],"nombre":r[1],"correo":r[2]} for r in rows])
               except Exception as e:
-                  return jsonify({"error": str(e)}), 500
+                  return jsonify({"error":str(e)}),500
 
           @app.route('/alumnos/<int:alumno_id>/notas', methods=['GET'])
           def get_notas(alumno_id):
               try:
-                  conn = get_db()
-                  cur = conn.cursor()
-                  cur.execute("""
-                      SELECT i.id, i.asignatura_id, i.nota
-                      FROM inscripciones i
-                      WHERE i.alumno_id = %s
-                  """, (alumno_id,))
-                  rows = cur.fetchall()
-                  cur.close()
-                  conn.close()
-                  return jsonify([{"id": r[0], "asignatura_id": r[1], "nota": r[2]} for r in rows])
+                  conn=get_db(); cur=conn.cursor()
+                  cur.execute("SELECT i.id,i.asignatura_id,i.nota FROM inscripciones i WHERE i.alumno_id=%s",(alumno_id,))
+                  rows=cur.fetchall(); cur.close(); conn.close()
+                  return jsonify([{"id":r[0],"asignatura_id":r[1],"nota":r[2]} for r in rows])
               except Exception as e:
-                  return jsonify({"error": str(e)}), 500
+                  return jsonify({"error":str(e)}),500
 
           @app.route('/alumnos/<int:alumno_id>/inscripciones', methods=['POST'])
           def inscribir(alumno_id):
-              data = request.get_json()
+              data=request.get_json()
               try:
-                  conn = get_db()
-                  cur = conn.cursor()
-                  cur.execute("""
-                      INSERT INTO inscripciones (alumno_id, asignatura_id)
-                      VALUES (%s, %s) RETURNING id
-                  """, (alumno_id, data['asignatura_id']))
-                  new_id = cur.fetchone()[0]
-                  conn.commit()
-                  cur.close()
-                  conn.close()
-                  return jsonify({"id": new_id, "mensaje": "Inscripcion realizada"}), 201
+                  conn=get_db(); cur=conn.cursor()
+                  cur.execute("INSERT INTO inscripciones (alumno_id,asignatura_id) VALUES (%s,%s) RETURNING id",(alumno_id,data['asignatura_id']))
+                  new_id=cur.fetchone()[0]; conn.commit(); cur.close(); conn.close()
+                  return jsonify({"id":new_id,"mensaje":"Inscripcion realizada"}),201
               except Exception as e:
-                  return jsonify({"error": str(e)}), 500
+                  return jsonify({"error":str(e)}),500
 
-          @app.route('/health', methods=['GET'])
+          @app.route('/health')
           def health():
-              return jsonify({"status": "ok", "servidor": "WebServer1-AlumnoC"})
+              return jsonify({"status":"ok","servidor":"WebServer1-AlumnoC"})
 
-          if __name__ == '__main__':
-              app.run(host='0.0.0.0', port=5000)
+          if __name__=='__main__':
+              app.run(host='0.0.0.0',port=5000)
           PYAPP
 
-          # ── Crear servicio systemd para Flask ──
           cat > /etc/systemd/system/flask-app.service << 'SERVICE'
           [Unit]
-          Description=Flask App Alumno C
+          Description=Flask App AlumnoC
           After=network.target
-
           [Service]
           User=root
           WorkingDirectory=/opt/app
           Environment="DB_HOST=${DBIP}"
-          Environment="DB_NAME=practica_db"
-          Environment="DB_USER=alumno_c"
-          Environment="DB_PASS=Airbusds2026!"
+          Environment="DB_NAME=${DBName}"
+          Environment="DB_USER=${DBUser}"
+          Environment="DB_PASS=${DBPass}"
           ExecStart=/usr/bin/python3 /opt/app/app.py
           Restart=always
-
+          RestartSec=5
           [Install]
           WantedBy=multi-user.target
           SERVICE
 
           systemctl enable --now flask-app
 
-          # ── Configurar Nginx como reverse proxy ──
+          # Nginx
           cat > /etc/nginx/conf.d/alumnos.conf << 'NGINX'
           server {
               listen 80;
               server_name _;
-
               location /alumnos {
                   proxy_pass http://127.0.0.1:5000;
                   proxy_set_header Host $host;
                   proxy_set_header X-Real-IP $remote_addr;
               }
-
               location /health {
                   proxy_pass http://127.0.0.1:5000;
               }
           }
           NGINX
 
-          # Quitar configuracion por defecto de Nginx
           rm -f /etc/nginx/conf.d/default.conf
-
+          sed -i 's/listen       80;/#listen       80;/g' /etc/nginx/nginx.conf
+          sed -i 's/listen       \[::\]:80;/#listen       [::]:80;/g' /etc/nginx/nginx.conf
           systemctl enable --now nginx
           systemctl restart nginx
 
-          echo "WebServer1 AlumnoC configurado correctamente" > /tmp/setup_done.txt
+          echo "WebServer1-AlumnoC OK" > /tmp/setup_done.txt
 
   EIPAssociation1:
     Type: AWS::EC2::EIPAssociation
@@ -246,7 +264,7 @@ Resources:
       EIP: !Ref EIPWebServer1
 
   # -------------------------------------------------------
-  # Web Server 2 - Alumno C (redundancia)
+  # Web Server 2
   # -------------------------------------------------------
   WebServer2:
     Type: AWS::EC2::Instance
@@ -254,6 +272,7 @@ Resources:
       InstanceType: t3.micro
       ImageId: ami-048dc219ff68b99b1
       KeyName: !Ref KeyPairName
+      IamInstanceProfile: !Ref InstanceProfileAlumnoC
       NetworkInterfaces:
         - AssociatePublicIpAddress: false
           DeviceIndex: '0'
@@ -269,11 +288,9 @@ Resources:
           set -e
           exec > /var/log/userdata.log 2>&1
 
-          # ── Actualizar sistema ──
           dnf update -y
           dnf install -y nginx python3 python3-pip chrony postgresql15
 
-          # ── Configurar NTP con el AD ──
           cat > /etc/chrony.conf << 'CHRONY'
           server ${ADIP} iburst prefer
           server 0.pool.ntp.org iburst
@@ -282,123 +299,96 @@ Resources:
           rtcsync
           CHRONY
           systemctl enable --now chronyd
-          chronyc makestep
+          chronyc makestep || true
 
-          # ── Instalar dependencias Python ──
           pip3 install flask psycopg2-binary flask-cors
 
-          # ── Crear aplicacion Flask modulo /alumnos ──
           mkdir -p /opt/app
           cat > /opt/app/app.py << 'PYAPP'
           from flask import Flask, jsonify, request
           from flask_cors import CORS
-          import psycopg2
-          import os
+          import psycopg2, os
 
           app = Flask(__name__)
           CORS(app)
 
-          DB_HOST = os.environ.get('DB_HOST', '${DBIP}')
-          DB_NAME = os.environ.get('DB_NAME', 'practica_db')
-          DB_USER = os.environ.get('DB_USER', 'alumno_c')
-          DB_PASS = os.environ.get('DB_PASS', 'Airbusds2026!')
-
           def get_db():
               return psycopg2.connect(
-                  host=DB_HOST, database=DB_NAME,
-                  user=DB_USER, password=DB_PASS
+                  host=os.environ.get('DB_HOST','${DBIP}'),
+                  database=os.environ.get('DB_NAME','${DBName}'),
+                  user=os.environ.get('DB_USER','${DBUser}'),
+                  password=os.environ.get('DB_PASS','${DBPass}'),
+                  port=5432
               )
 
           @app.route('/alumnos', methods=['GET'])
           def get_alumnos():
               try:
-                  conn = get_db()
-                  cur = conn.cursor()
+                  conn=get_db(); cur=conn.cursor()
                   cur.execute("SELECT id, nombre, correo FROM alumnos ORDER BY nombre")
-                  rows = cur.fetchall()
-                  cur.close()
-                  conn.close()
-                  return jsonify([{"id": r[0], "nombre": r[1], "correo": r[2]} for r in rows])
+                  rows=cur.fetchall(); cur.close(); conn.close()
+                  return jsonify([{"id":r[0],"nombre":r[1],"correo":r[2]} for r in rows])
               except Exception as e:
-                  return jsonify({"error": str(e)}), 500
+                  return jsonify({"error":str(e)}),500
 
           @app.route('/alumnos/<int:alumno_id>/notas', methods=['GET'])
           def get_notas(alumno_id):
               try:
-                  conn = get_db()
-                  cur = conn.cursor()
-                  cur.execute("""
-                      SELECT i.id, i.asignatura_id, i.nota
-                      FROM inscripciones i
-                      WHERE i.alumno_id = %s
-                  """, (alumno_id,))
-                  rows = cur.fetchall()
-                  cur.close()
-                  conn.close()
-                  return jsonify([{"id": r[0], "asignatura_id": r[1], "nota": r[2]} for r in rows])
+                  conn=get_db(); cur=conn.cursor()
+                  cur.execute("SELECT i.id,i.asignatura_id,i.nota FROM inscripciones i WHERE i.alumno_id=%s",(alumno_id,))
+                  rows=cur.fetchall(); cur.close(); conn.close()
+                  return jsonify([{"id":r[0],"asignatura_id":r[1],"nota":r[2]} for r in rows])
               except Exception as e:
-                  return jsonify({"error": str(e)}), 500
+                  return jsonify({"error":str(e)}),500
 
           @app.route('/alumnos/<int:alumno_id>/inscripciones', methods=['POST'])
           def inscribir(alumno_id):
-              data = request.get_json()
+              data=request.get_json()
               try:
-                  conn = get_db()
-                  cur = conn.cursor()
-                  cur.execute("""
-                      INSERT INTO inscripciones (alumno_id, asignatura_id)
-                      VALUES (%s, %s) RETURNING id
-                  """, (alumno_id, data['asignatura_id']))
-                  new_id = cur.fetchone()[0]
-                  conn.commit()
-                  cur.close()
-                  conn.close()
-                  return jsonify({"id": new_id, "mensaje": "Inscripcion realizada"}), 201
+                  conn=get_db(); cur=conn.cursor()
+                  cur.execute("INSERT INTO inscripciones (alumno_id,asignatura_id) VALUES (%s,%s) RETURNING id",(alumno_id,data['asignatura_id']))
+                  new_id=cur.fetchone()[0]; conn.commit(); cur.close(); conn.close()
+                  return jsonify({"id":new_id,"mensaje":"Inscripcion realizada"}),201
               except Exception as e:
-                  return jsonify({"error": str(e)}), 500
+                  return jsonify({"error":str(e)}),500
 
-          @app.route('/health', methods=['GET'])
+          @app.route('/health')
           def health():
-              return jsonify({"status": "ok", "servidor": "WebServer2-AlumnoC"})
+              return jsonify({"status":"ok","servidor":"WebServer2-AlumnoC"})
 
-          if __name__ == '__main__':
-              app.run(host='0.0.0.0', port=5000)
+          if __name__=='__main__':
+              app.run(host='0.0.0.0',port=5000)
           PYAPP
 
-          # ── Crear servicio systemd para Flask ──
           cat > /etc/systemd/system/flask-app.service << 'SERVICE'
           [Unit]
-          Description=Flask App Alumno C
+          Description=Flask App AlumnoC WS2
           After=network.target
-
           [Service]
           User=root
           WorkingDirectory=/opt/app
           Environment="DB_HOST=${DBIP}"
-          Environment="DB_NAME=practica_db"
-          Environment="DB_USER=alumno_c"
-          Environment="DB_PASS=Airbusds2026!"
+          Environment="DB_NAME=${DBName}"
+          Environment="DB_USER=${DBUser}"
+          Environment="DB_PASS=${DBPass}"
           ExecStart=/usr/bin/python3 /opt/app/app.py
           Restart=always
-
+          RestartSec=5
           [Install]
           WantedBy=multi-user.target
           SERVICE
 
           systemctl enable --now flask-app
 
-          # ── Configurar Nginx como reverse proxy ──
           cat > /etc/nginx/conf.d/alumnos.conf << 'NGINX'
           server {
               listen 80;
               server_name _;
-
               location /alumnos {
                   proxy_pass http://127.0.0.1:5000;
                   proxy_set_header Host $host;
                   proxy_set_header X-Real-IP $remote_addr;
               }
-
               location /health {
                   proxy_pass http://127.0.0.1:5000;
               }
@@ -406,10 +396,12 @@ Resources:
           NGINX
 
           rm -f /etc/nginx/conf.d/default.conf
+          sed -i 's/listen       80;/#listen       80;/g' /etc/nginx/nginx.conf
+          sed -i 's/listen       \[::\]:80;/#listen       [::]:80;/g' /etc/nginx/nginx.conf
           systemctl enable --now nginx
           systemctl restart nginx
 
-          echo "WebServer2 AlumnoC configurado correctamente" > /tmp/setup_done.txt
+          echo "WebServer2-AlumnoC OK" > /tmp/setup_done.txt
 
   EIPAssociation2:
     Type: AWS::EC2::EIPAssociation
@@ -420,19 +412,19 @@ Resources:
 Outputs:
 
   WebServer1IP:
-    Description: IP publica WebServer1
+    Description: IP publica WebServer1 (dar al Load Balancer)
     Value: !Ref EIPWebServer1
 
   WebServer2IP:
-    Description: IP publica WebServer2
+    Description: IP publica WebServer2 (dar al Load Balancer)
     Value: !Ref EIPWebServer2
 
   WebServer1PrivateIP:
-    Description: IP privada WebServer1 (para el Load Balancer)
+    Description: IP privada WebServer1
     Value: !GetAtt WebServer1.PrivateIp
 
   WebServer2PrivateIP:
-    Description: IP privada WebServer2 (para el Load Balancer)
+    Description: IP privada WebServer2
     Value: !GetAtt WebServer2.PrivateIp
 
   HealthCheck1:
@@ -442,3 +434,7 @@ Outputs:
   HealthCheck2:
     Description: URL health check WebServer2
     Value: !Sub "http://${EIPWebServer2}/health"
+
+  RolIAM:
+    Description: ARN del rol IAM para acceso S3 cross-account
+    Value: !GetAtt RolEC2S3AlumnoC.Arn
