@@ -1,0 +1,17 @@
+[Unit]
+Description=Flask App AlumnoD WS1
+After=network.target
+
+[Service]
+User=root
+WorkingDirectory=/opt/app
+Environment="DB_HOST=10.20.2.45"
+Environment="DB_NAME=universidad"
+Environment="DB_USER=app_user"
+Environment="DB_PASS=app_password"
+ExecStart=/usr/bin/python3 /opt/app/app.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
