@@ -1,0 +1,80 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Despliegue Alumno D - Portal de Profesores Final
+
+Parameters:
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Default: Llave_AlumnoD
+
+Resources:
+  # Grupo de Seguridad (Asegurando puerto 80 abierto)
+  MiguiSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Acceso Web y SSH
+      VpcId: vpc-0e4574e90bd362453
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+  # Instancia EC2 con la web de Profesores integrada
+  MiguiWebServer:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.micro
+      ImageId: ami-048dc219ff68b99b1
+      KeyName: !Ref KeyPairName
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: '0'
+          SubnetId: subnet-0a37c560410204510
+          GroupSet:
+            - !Ref MiguiSecurityGroup
+      Tags:
+        - Key: Name
+          Value: Webserver_Migui_D
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          dnf update -y
+          dnf install -y nginx
+          systemctl enable --now nginx
+          
+          # Creamos el portal de profesores directamente
+          cat <<EOF > /usr/share/nginx/html/index.html
+          <!DOCTYPE html>
+          <html>
+          <head>
+              <meta charset="UTF-8">
+              <title>Portal de Profesores - VPC D</title>
+              <style>
+                  body { font-family: sans-serif; background-color: #f4f4f9; text-align: center; padding: 50px; }
+                  .box { background: white; padding: 40px; border-radius: 15px; box-shadow: 0 4px 15px rgba(0,0,0,0.2); display: inline-block; border-top: 8px solid #232f3e; }
+                  h1 { color: #232f3e; margin-bottom: 20px; }
+                  .info { text-align: left; background: #f9f9f9; padding: 15px; border-radius: 8px; }
+              </style>
+          </head>
+          <body>
+              <div class="box">
+                  <h1>MIGUI - Portal de Profesores</h1>
+                  <div class="info">
+                      <p><strong>Cátedra:</strong> Gestión de Infraestructuras AWS</p>
+                      <p><strong>Alumno:</strong> Migui (Grupo D)</p>
+                      <p><strong>Región:</strong> eu-south-2 (España)</p>
+                  </div>
+                  <p style="color: #27ae60; font-weight: bold; margin-top: 20px;">✓ Conexión establecida con VPC A y VPC B</p>
+              </div>
+          </body>
+          </html>
+          EOF
+
+Outputs:
+  DireccionWeb:
+    Description: Haz clic aquí para ver tu portal
+    Value: !Sub "http://${MiguiWebServer.PublicIp}"
