@@ -1,7 +1,8 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
-  Practica UFV - eu-south-2 (Spain): Windows AD sobre VPC existente
-  Windows Server 2025, t3.micro, IP privada fija 10.10.1.10
+  Practica UFV - eu-south-2 (Spain): Windows AD + Cliente Windows
+  AD: Windows Server 2025, IP privada fija 10.10.1.10
+  Cliente: Windows Server 2025, IP privada fija 10.10.1.20
 
 Parameters:
 
@@ -10,11 +11,12 @@ Parameters:
     Type: AWS::EC2::KeyPair::KeyName
 
   MyIP:
-    Description: Tu IP publica para acceso RDP (ejemplo 203.0.113.25/32)
+    Description: Tu IP publica para acceso RDP (0.0.0.0/0 para cualquiera)
     Type: String
+    Default: 0.0.0.0/0
 
   VpcId:
-    Description: ID de tu VPC existente (proyecto-vpc 10.10.0.0/16)
+    Description: ID de tu VPC existente (10.10.0.0/16)
     Type: AWS::EC2::VPC::Id
     Default: vpc-0c5d48a4d174c5c9b
 
@@ -32,7 +34,6 @@ Resources:
 
   # -------------------------------------------------------
   # ROL IAM PARA EC2
-  # Permite a la instancia acceder a S3 sin credenciales hardcodeadas
   # -------------------------------------------------------
   RolEC2S3Spain:
     Type: AWS::IAM::Role
@@ -56,9 +57,7 @@ Resources:
         - !Ref RolEC2S3Spain
 
   # -------------------------------------------------------
-  # SECURITY GROUP PROPIO
-  # Explicación: Creamos el SG dentro del stack usando el VpcId como parametro.
-  # Asi CloudFormation lo asocia correctamente a la VPC y no al default.
+  # SECURITY GROUP - SERVIDOR AD
   # -------------------------------------------------------
   SGWindowsAD:
     Type: AWS::EC2::SecurityGroup
@@ -67,45 +66,69 @@ Resources:
       GroupDescription: Security Group Windows AD Practica UFV
       VpcId: !Ref VpcId
       SecurityGroupIngress:
-        # RDP solo desde tu IP
         - IpProtocol: tcp
           FromPort: 3389
           ToPort: 3389
           CidrIp: !Ref MyIP
           Description: RDP desde IP del administrador
-        # Todo el trafico interno de la VPC (necesario para AD, DNS, DHCP, Kerberos)
         - IpProtocol: -1
           CidrIp: 10.10.0.0/16
           Description: Trafico interno VPC
-        # Trafico desde VPCs del equipo via peering (10.20-50.0.0/16)
         - IpProtocol: -1
           CidrIp: 10.0.0.0/8
           Description: Trafico desde VPCs del equipo via peering
-        # HTTPS para descargar AWS CLI y scripts desde S3
         - IpProtocol: tcp
           FromPort: 443
           ToPort: 443
           CidrIp: 0.0.0.0/0
-          Description: HTTPS saliente para S3 y actualizaciones
+          Description: HTTPS para S3 y actualizaciones
       Tags:
         - Key: Name
           Value: SG-Windows-AD-UFV
 
   # -------------------------------------------------------
-  # ELASTIC IP
-  # IP publica fija que no cambia aunque la instancia se reinicie
+  # SECURITY GROUP - CLIENTE WINDOWS
   # -------------------------------------------------------
-  ElasticIPWindowsSpain:
+  SGWindowsCliente:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: SG-Windows-Cliente-UFV
+      GroupDescription: Security Group Windows Cliente Practica UFV
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3389
+          ToPort: 3389
+          CidrIp: !Ref MyIP
+          Description: RDP desde IP del administrador
+        - IpProtocol: -1
+          CidrIp: 10.10.0.0/16
+          Description: Trafico interno VPC (AD, DNS, DHCP, Kerberos)
+      Tags:
+        - Key: Name
+          Value: SG-Windows-Cliente-UFV
+
+  # -------------------------------------------------------
+  # ELASTIC IP - AD
+  # -------------------------------------------------------
+  ElasticIPWindowsAD:
     Type: AWS::EC2::EIP
     Properties:
       Domain: vpc
 
   # -------------------------------------------------------
-  # EC2 WINDOWS SERVER 2025 - Controlador de Dominio
+  # ELASTIC IP - CLIENTE
   # -------------------------------------------------------
-  EC2WindowsSpain:
+  ElasticIPWindowsCliente:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  # -------------------------------------------------------
+  # EC2 - SERVIDOR ACTIVE DIRECTORY (10.10.1.10)
+  # -------------------------------------------------------
+  EC2WindowsAD:
     Type: AWS::EC2::Instance
-    DependsOn: SGWindowsAD
     Properties:
       ImageId: ami-07bda9eb187fd0680
       InstanceType: t3.micro
@@ -121,7 +144,6 @@ Resources:
       UserData:
         Fn::Base64: !Sub |
           <powershell>
-          # Evitar ejecucion multiple
           if (Test-Path "C:\AD_USERDATA_EJECUTADO.txt") { exit }
           "done" | Out-File "C:\AD_USERDATA_EJECUTADO.txt"
 
@@ -139,26 +161,118 @@ Resources:
           & "C:\Program Files\Amazon\AWSCLIV2\aws.exe" s3 cp s3://${S3BucketName}/alumno-a/scripts/DC01_Parte1_InstalarAD.ps1 C:\DC01_Parte1_InstalarAD.ps1 --region eu-south-2
           & "C:\Program Files\Amazon\AWSCLIV2\aws.exe" s3 cp s3://${S3BucketName}/alumno-a/scripts/DC01_Parte2_Configurar.ps1 C:\DC01_Parte2_Configurar.ps1 --region eu-south-2
 
-          # Ejecutar Parte 1
+          # Ejecutar Parte 1 (instala AD DS, programa Parte 2 y reinicia)
           & PowerShell.exe -ExecutionPolicy Bypass -File C:\DC01_Parte1_InstalarAD.ps1
           </powershell>
 
-  EIPAssociationWindowsSpain:
+  EIPAssociationAD:
     Type: AWS::EC2::EIPAssociation
     Properties:
-      InstanceId: !Ref EC2WindowsSpain
-      EIP: !Ref ElasticIPWindowsSpain
+      InstanceId: !Ref EC2WindowsAD
+      EIP: !Ref ElasticIPWindowsAD
+
+  # -------------------------------------------------------
+  # EC2 - CLIENTE WINDOWS (10.10.1.20)
+  # Se une automaticamente al dominio ufv.local tras el arranque
+  # NOTA: Espera ~10 min a que el AD este listo antes de conectarte
+  # -------------------------------------------------------
+  EC2WindowsCliente:
+    Type: AWS::EC2::Instance
+    DependsOn: EC2WindowsAD
+    Properties:
+      ImageId: ami-07bda9eb187fd0680
+      InstanceType: t3.micro
+      KeyName: !Ref KeyName
+      SubnetId: !Ref SubnetPublicaId
+      PrivateIpAddress: 10.10.1.20
+      SecurityGroupIds:
+        - !Ref SGWindowsCliente
+      Tags:
+        - Key: Name
+          Value: EC2-Windows-Cliente
+      UserData:
+        Fn::Base64: |
+          <powershell>
+          if (Test-Path "C:\CLIENTE_USERDATA_EJECUTADO.txt") { exit }
+          "done" | Out-File "C:\CLIENTE_USERDATA_EJECUTADO.txt"
+
+          Start-Sleep -Seconds 30
+          Set-ExecutionPolicy Bypass -Scope LocalMachine -Force
+
+          # Configurar DNS apuntando al AD (10.10.1.10)
+          $adapter = Get-NetAdapter | Where-Object { $_.Status -eq "Up" } | Select-Object -First 1
+          Set-DnsClientServerAddress -InterfaceIndex $adapter.InterfaceIndex -ServerAddresses "10.10.1.10"
+
+          # Esperar a que el AD este completamente listo (la Parte 2 tarda ~5 min tras el reinicio del AD)
+          Write-Host "Esperando a que el AD este listo..." 
+          Start-Sleep -Seconds 600
+
+          # Intentar union al dominio (hasta 5 intentos)
+          $intentos = 0
+          $exito = $false
+          while ($intentos -lt 5 -and -not $exito) {
+            try {
+              $password = ConvertTo-SecureString "Airbusds2026!" -AsPlainText -Force
+              $cred = New-Object System.Management.Automation.PSCredential("UFV\Administrator", $password)
+              Add-Computer -DomainName "ufv.local" -Credential $cred -Force -ErrorAction Stop
+              $exito = $true
+              Write-Host "Union al dominio exitosa."
+            } catch {
+              $intentos++
+              Write-Host "Intento $intentos fallido: $_. Reintentando en 60s..."
+              Start-Sleep -Seconds 60
+            }
+          }
+
+          if ($exito) {
+            # Anadir usuarios al grupo Remote Desktop Users
+            net localgroup "Remote Desktop Users" "UFV\user1" /add
+            net localgroup "Remote Desktop Users" "UFV\user2" /add
+            net localgroup "Remote Desktop Users" "UFV\UFV_group" /add
+
+            # Habilitar RDP
+            Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0
+            Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+
+            # Reiniciar para aplicar la union al dominio
+            Restart-Computer -Force
+          } else {
+            Write-Host "No se pudo unir al dominio tras 5 intentos. Une manualmente."
+          }
+          </powershell>
+
+  EIPAssociationCliente:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      InstanceId: !Ref EC2WindowsCliente
+      EIP: !Ref ElasticIPWindowsCliente
 
 Outputs:
 
   ElasticIPAD:
-    Description: IP publica del Windows AD
-    Value: !Ref ElasticIPWindowsSpain
+    Description: IP publica del Windows AD (RDP con Administrator / Airbusds2026!)
+    Value: !Ref ElasticIPWindowsAD
 
   PrivateIPAD:
     Description: IP privada del Windows AD
     Value: 10.10.1.10
 
-  SecurityGroupId:
-    Description: ID del Security Group creado
+  ElasticIPCliente:
+    Description: IP publica del Cliente Windows (RDP con UFV\user1 / Airbusds2026! tras ~15 min)
+    Value: !Ref ElasticIPWindowsCliente
+
+  PrivateIPCliente:
+    Description: IP privada del Cliente Windows
+    Value: 10.10.1.20
+
+  SecurityGroupAD:
+    Description: ID del Security Group del AD
     Value: !Ref SGWindowsAD
+
+  SecurityGroupCliente:
+    Description: ID del Security Group del Cliente
+    Value: !Ref SGWindowsCliente
+
+  InstruccionesConexion:
+    Description: Como conectarse
+    Value: "1) Espera 5 min para el AD. 2) Espera 20 min para el Cliente. 3) RDP al Cliente con UFV\user1 y Airbusds2026!"
